@@ -672,6 +672,56 @@ def place_stock_order(item_name: str, quantity: int, price: float, date: str) ->
     except Exception as e:
         return f"Error placing stock order: {e}"
 
+@tool
+def get_full_inventory_report(as_of_date: str) -> str:
+    """
+    Provides a full report of all items in inventory with their current stock levels.
+
+    Args:
+        as_of_date (str): The date for the report, in YYYY-MM-DD format.
+
+    Returns:
+        A string representation of the inventory report.
+    """
+    inventory_dict = get_all_inventory(as_of_date)
+    if not inventory_dict:
+        return "No inventory found."
+    return pd.DataFrame.from_dict(inventory_dict, orient='index', columns=['stock']).to_string()
+
+@tool
+def check_cash_balance(as_of_date: str) -> str:
+    """
+    Checks the current cash balance of the company.
+
+    Args:
+        as_of_date (str): The date to check the balance on, in YYYY-MM-DD format.
+
+    Returns:
+        A string stating the current cash balance.
+    """
+    balance = get_cash_balance(as_of_date)
+    return f"The current cash balance is ${balance:.2f}."
+
+@tool
+def get_company_financials(as_of_date: str) -> str:
+    """
+    Generates a complete financial report for the company for internal use.
+
+    Args:
+        as_of_date (str): The date for the report, in YYYY-MM-DD format.
+
+    Returns:
+        A string summarizing the financial report.
+    """
+    report = generate_financial_report(as_of_date)
+    return (
+        f"Financial Report as of {report['as_of_date']}:\n"
+        f"Cash Balance: ${report['cash_balance']:.2f}\n"
+        f"Inventory Value: ${report['inventory_value']:.2f}\n"
+        f"Total Assets: ${report['total_assets']:.2f}\n"
+        f"Top Selling Products: {report['top_selling_products']}"
+    )
+
 
 # Tools for quoting agent
 @tool
@@ -700,6 +750,7 @@ def quote_history(customer_request: str) -> str:
 def get_pricing_and_availability(item_name: str, quantity: int, as_of_date: str) -> str:
     """
     Gets the current price, availability, and estimated delivery date for a given item and quantity.
+    Applies a bulk discount for larger orders.
 
     Args:
         item_name (str): The name of the item to check.
@@ -715,16 +766,33 @@ def get_pricing_and_availability(item_name: str, quantity: int, as_of_date: str)
         if inventory_df.empty:
             return f"Item {item_name} not found in inventory."
 
-        price = inventory_df.iloc[0]["unit_price"]
+        unit_price = inventory_df.iloc[0]["unit_price"]
         stock_level_df = get_stock_level(item_name, as_of_date)
         current_stock = stock_level_df.iloc[0]['current_stock']
 
-        # Use the helper function to estimate delivery
+        # Apply strategic discounts
+        discount_rate = 0
+        if 100 < quantity <= 500:
+            discount_rate = 0.05  # 5% discount
+        elif quantity > 500:
+            discount_rate = 0.10  # 10% discount
+
+        total_price_before_discount = unit_price * quantity
+        discount_amount = total_price_before_discount * discount_rate
+        final_price = total_price_before_discount - discount_amount
+
+        discount_explanation = "No discount applied."
+        if discount_rate > 0:
+            discount_explanation = (f"A {discount_rate:.0%} bulk discount was applied, "
+                                    f"saving you ${discount_amount:.2f}.")
+
         delivery_date = get_supplier_delivery_date(as_of_date, quantity)
 
-        return (f"Item: {item_name}, Price per unit: ${price}, "
-                f"Availability: {current_stock} units. "
-                f"For an order of {quantity} units, the estimated delivery date is {delivery_date}.")
+        return (f"Item: {item_name}, Price per unit: ${unit_price:.2f}, "
+                f"Total for {quantity} units: ${final_price:.2f}. "
+                f"{discount_explanation} "
+                f"Current Availability: {current_stock} units. "
+                f"Estimated delivery date: {delivery_date}.")
     except Exception as e:
         return f"Error getting pricing and availability: {e}"
 
@@ -759,10 +827,23 @@ class InventoryAgent(ToolCallingAgent):
     """Agent for managing inventory."""
     def __init__(self, model: OpenAIServerModel):
         super().__init__(
-            tools=[check_stock_levels, check_reorder_status, place_stock_order],
+            tools=[
+                check_stock_levels,
+                check_reorder_status,
+                place_stock_order,
+                get_full_inventory_report,
+                check_cash_balance,
+                get_company_financials
+            ],
             model=model,
             name="inventory_agent",
-            description="Agent for managing inventory. Check stock levels, determine if items need to be reordered, and place new stock orders.",
+            description=(
+                "Agent for managing inventory. Handles inquiries about stock levels and inventory reports. "
+                "It is also responsible for the reordering workflow: "
+                "1. Check if an item needs reordering. "
+                "2. If it does, check the company's cash balance to ensure sufficient funds. "
+                "3. If there is enough cash, place a stock order to replenish the inventory."
+            )
         )
 
 class QuotingAgent(ToolCallingAgent):
@@ -785,19 +866,25 @@ class OrderingAgent(ToolCallingAgent):
             description="Agent for finalizing customer orders by creating sales transactions in the database.",
         )
 
-ORCHESTRATOR_SYSTEM_PROMPT = """You are a master orchestrator agent. Your primary role is to understand a user's request and delegate it to the appropriate specialized agent by calling it like a tool.
+ORCHESTRATOR_SYSTEM_PROMPT = """You are a master orchestrator agent acting as an expert planner and delegator. Your goal is to fulfill user requests in the most efficient way possible using a dynamic, adaptive workflow.
+
 Here are the available agents and their responsibilities:
 - **inventory_agent**: Use for inquiries about stock levels, inventory, and reordering supplies.
 - **quoting_agent**: Use for requests for quotes, pricing, and product availability.
 - **ordering_agent**: Use to finalize an order, place an order, or purchase items.
 
-Here is your workflow:
-1.  Analyze the user's request to determine the primary intent (inventory, quoting, or ordering).
-2.  Delegate the task to the corresponding agent by calling it directly.
-3.  For placing or finalizing an order, you must follow a strict two-step process:
-    a. First, you MUST call the `quoting_agent` to get the price and check for stock availability. You must extract the item name and quantity from the user's request to do this.
-    b. After you have confirmed the item is in stock from the response, you MUST then call the `ordering_agent` to finalize the transaction. You need to extract the item name, quantity, and total price from the conversation to make this call.
-Do not try to answer the user directly. Your job is to call the correct agents to delegate tasks and synthesize the final answer after the workflow is complete."""
+Here is your adaptive workflow:
+1.  **Plan**: First, analyze the user's request to create a minimal, step-by-step plan. Your plan should use the fewest steps necessary to achieve the user's goal.
+2.  **Execute & Review**: Execute your plan one step at a time by calling the appropriate agent. After each step, review the outcome.
+    - If the plan remains valid and optimal, proceed to the next step.
+    - If the outcome requires a change (e.g., an item is out of stock), you MUST revise your plan to find the new most efficient path. Do not change the plan unnecessarily.
+3.  **Special Rule for Ordering**: For placing or finalizing an order, you must follow a strict two-step process:
+    a. First, you MUST call the `quoting_agent` to get the price and check for stock availability.
+    b. Only after confirming the item is in stock, you MUST then call the `ordering_agent` to finalize the transaction. This rule is a mandatory part of any plan involving an order.
+4.  **Finalize**: When the plan is complete, you MUST synthesize the final answer for the user. Your response should be a clean, natural language summary.
+    - DO NOT include tool names, function calls, or raw data logs in your final answer.
+    - Explain the outcome clearly. For example, if a discount was applied, mention it. If an item is out of stock, state it clearly.
+"""
 
 
 class OrchestratorAgent(ToolCallingAgent):
@@ -829,7 +916,7 @@ class OrchestratorAgent(ToolCallingAgent):
             ],
             # Pass the customized prompt templates
             prompt_templates=prompt_templates,
-            max_steps=5
+            max_steps=10
         )
 
 
