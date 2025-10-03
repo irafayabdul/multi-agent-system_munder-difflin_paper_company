@@ -591,6 +591,8 @@ def search_quote_history(search_terms: List[str], limit: int = 5) -> List[Dict]:
 
 # Set up and load your env parameters and instantiate your model.
 from smolagents import ToolCallingAgent, OpenAIServerModel, tool
+import yaml
+import importlib.resources
 
 # SET UP ENVIRONMENT AND MODEL
 dotenv.load_dotenv()
@@ -783,70 +785,51 @@ class OrderingAgent(ToolCallingAgent):
             description="Agent for finalizing customer orders by creating sales transactions in the database.",
         )
 
+ORCHESTRATOR_SYSTEM_PROMPT = """You are a master orchestrator agent. Your primary role is to understand a user's request and delegate it to the appropriate specialized agent by calling it like a tool.
+Here are the available agents and their responsibilities:
+- **inventory_agent**: Use for inquiries about stock levels, inventory, and reordering supplies.
+- **quoting_agent**: Use for requests for quotes, pricing, and product availability.
+- **ordering_agent**: Use to finalize an order, place an order, or purchase items.
+
+Here is your workflow:
+1.  Analyze the user's request to determine the primary intent (inventory, quoting, or ordering).
+2.  Delegate the task to the corresponding agent by calling it directly.
+3.  For placing or finalizing an order, you must follow a strict two-step process:
+    a. First, you MUST call the `quoting_agent` to get the price and check for stock availability. You must extract the item name and quantity from the user's request to do this.
+    b. After you have confirmed the item is in stock from the response, you MUST then call the `ordering_agent` to finalize the transaction. You need to extract the item name, quantity, and total price from the conversation to make this call.
+Do not try to answer the user directly. Your job is to call the correct agents to delegate tasks and synthesize the final answer after the workflow is complete."""
+
+
 class OrchestratorAgent(ToolCallingAgent):
-    """Orchestrator agent for managing the multi-agent system."""
-    def __init__(self, model: OpenAIServerModel):
-        self.inventory_agent = InventoryAgent(model)
-        self.quoting_agent = QuotingAgent(model)
-        self.ordering_agent = OrderingAgent(model)
+    """
+    The OrchestratorAgent is the master agent that delegates tasks to other specialized agents.
+    """
+    def __init__(self, model):
+        # Instantiate the specialized agents
+        inventory_agent = InventoryAgent(model=model)
+        quoting_agent = QuotingAgent(model=model)
+        ordering_agent = OrderingAgent(model=model)
 
-        @tool
-        def delegate_to_inventory_agent(request: str) -> str:
-            """
-            Use this tool for inquiries about stock levels, inventory, and reordering supplies.
+        # Load default prompt templates for the ToolCallingAgent
+        prompt_templates = yaml.safe_load(
+            importlib.resources.files("smolagents.prompts").joinpath("toolcalling_agent.yaml").read_text()
+        )
+        # Set the custom system prompt for the Orchestrator
+        prompt_templates["system_prompt"] = ORCHESTRATOR_SYSTEM_PROMPT
 
-            Args:
-                request (str): The user's request.
-
-            Returns:
-                The response from the inventory agent as a string.
-            """
-            print(f"Orchestrator determined intent: inventory")
-            return self.inventory_agent.run(request)
-
-        @tool
-        def delegate_to_quoting_agent(request: str) -> str:
-            """
-            Use this tool for requests for quotes, pricing, and product availability.
-
-            Args:
-                request (str): The user's request.
-
-            Returns:
-                The response from the quoting agent as a string.
-            """
-            print(f"Orchestrator determined intent: quoting")
-            return self.quoting_agent.run(request)
-
-        @tool
-        def delegate_to_ordering_agent(request: str) -> str:
-            """
-            Use this tool to finalize an order, place an order, or purchase items.
-
-            Args:
-                request (str): The user's request.
-
-            Returns:
-                The response from the ordering agent as a string.
-            """
-            print(f"Orchestrator determined intent: ordering")
-            return self.ordering_agent.run(request)
-
+        # Initialize the parent ToolCallingAgent
         super().__init__(
-            tools=[delegate_to_inventory_agent, delegate_to_quoting_agent, delegate_to_ordering_agent],
             model=model,
-            name="orchestrator_agent",
-            description="Orchestrator agent that determines the user's intent and delegates the task to the correct worker agent.",
-            system_prompt_template=(
-                "You are a master orchestrator agent. Your primary role is to understand a user's request and delegate it to the appropriate specialized agent. "
-                "Here is your workflow:\n"
-                "1. For inquiries about stock, inventory levels, or reordering, use the `delegate_to_inventory_agent` tool.\n"
-                "2. For requests for quotes, pricing, or product availability, use the `delegate_to_quoting_agent` tool.\n"
-                "3. To place or finalize an order, you must follow a strict two-step process:\n"
-                "   a. First, you MUST call `delegate_to_quoting_agent` to get the price and check for stock availability. You must extract the item name and quantity from the user's request to do this.\n"
-                "   b. After you have confirmed the item is in stock from the response, you MUST then call `delegate_to_ordering_agent` to finalize the transaction. You need to extract the item name, quantity, and total price from the conversation to make this call.\n"
-                "Do not try to answer the user directly. Your job is to call the correct tools in the correct sequence."
-            )
+            tools=[],
+            # Pass the specialized agents as managed_agents for proper delegation
+            managed_agents=[
+                inventory_agent,
+                quoting_agent,
+                ordering_agent,
+            ],
+            # Pass the customized prompt templates
+            prompt_templates=prompt_templates,
+            max_steps=5
         )
 
 
