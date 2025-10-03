@@ -590,22 +590,260 @@ def search_quote_history(search_terms: List[str], limit: int = 5) -> List[Dict]:
 
 
 # Set up and load your env parameters and instantiate your model.
+from smolagents import ToolCallingAgent, OpenAIServerModel, tool
+from openai import OpenAI
 
+# SET UP ENVIRONMENT AND MODEL
+dotenv.load_dotenv()
+model = OpenAIServerModel(
+    model_id="gpt-3.5-turbo", #gpt-4o-mini
+    api_base="https://openai.vocareum.com/v1",
+    api_key=os.getenv("OPENAI_API_KEY"),
+)
 
 """Set up tools for your agents to use, these should be methods that combine the database functions above
  and apply criteria to them to ensure that the flow of the system is correct."""
 
 
 # Tools for inventory agent
+@tool
+def check_stock_levels(item_name: str, as_of_date: str) -> str:
+    """
+    Checks the stock level for a given item.
+
+    Args:
+        item_name (str): The name of the item to check.
+        as_of_date (str): The date to check the stock level on, in YYYY-MM-DD format.
+
+    Returns:
+        A string representation of the DataFrame containing the stock level.
+    """
+    stock_level = get_stock_level(item_name, as_of_date)
+    return stock_level.to_string()
+
+@tool
+def check_reorder_status(item_name: str, as_of_date: str) -> str:
+    """
+    Checks if an item needs to be reordered by comparing the current stock to the minimum stock level.
+
+    Args:
+        item_name (str): The name of the item to check.
+        as_of_date (str): The date to check the reorder status on, in YYYY-MM-DD format.
+
+    Returns:
+        A string indicating whether the item needs to be reordered.
+    """
+    stock_level_df = get_stock_level(item_name, as_of_date)
+    if stock_level_df.empty or stock_level_df.iloc[0]["current_stock"] is None:
+        return f"Could not determine stock level for {item_name}."
+
+    current_stock = stock_level_df.iloc[0]["current_stock"]
+
+    inventory_df = pd.read_sql("SELECT min_stock_level FROM inventory WHERE item_name = :item_name", db_engine, params={"item_name": item_name})
+
+    if inventory_df.empty:
+        return f"Item {item_name} not found in inventory."
+
+    min_stock_level = inventory_df.iloc[0]["min_stock_level"]
+
+    if current_stock < min_stock_level:
+        return f"Item {item_name} needs to be reordered. Current stock: {current_stock}, Minimum stock: {min_stock_level}."
+    else:
+        return f"Item {item_name} is sufficiently stocked. Current stock: {current_stock}, Minimum stock: {min_stock_level}."
+
+@tool
+def place_stock_order(item_name: str, quantity: int, price: float, date: str) -> str:
+    """
+    Places a stock order for a given item.
+
+    Args:
+        item_name (str): The name of the item to order.
+        quantity (int): The number of units to order.
+        price (float): The total price of the order.
+        date (str): The date of the order, in YYYY-MM-DD format.
+
+    Returns:
+        A string confirming the stock order and providing a transaction ID, or an error message.
+    """
+    try:
+        transaction_id = create_transaction(item_name, "stock_orders", quantity, price, date)
+        return f"Stock order placed successfully. Transaction ID: {transaction_id}"
+    except Exception as e:
+        return f"Error placing stock order: {e}"
 
 
 # Tools for quoting agent
+@tool
+def quote_history(customer_request: str) -> str:
+    """
+    Searches for past quotes based on a customer's request.
 
+    Args:
+        customer_request (str): The customer's request to search for in the quote history.
+
+    Returns:
+        A string representation of the DataFrame containing past quotes, or a message if none are found.
+    """
+    try:
+        # Use the helper function by splitting the request into search terms
+        search_terms = customer_request.split()
+        quotes = search_quote_history(search_terms) # The helper function is called here
+        if not quotes:
+            return "No similar past quotes found."
+        return pd.DataFrame(quotes).to_string()
+    except Exception as e:
+        return f"Error searching quote history: {e}"
+
+
+@tool
+def get_pricing_and_availability(item_name: str, quantity: int, as_of_date: str) -> str:
+    """
+    Gets the current price, availability, and estimated delivery date for a given item and quantity.
+
+    Args:
+        item_name (str): The name of the item to check.
+        quantity (int): The number of units being requested.
+        as_of_date (str): The date to check the price and availability on, in YYYY-MM-DD format.
+
+    Returns:
+        A string with the item's price, availability, and estimated delivery date, or an error message.
+    """
+    try:
+        inventory_df = pd.read_sql("SELECT unit_price FROM inventory WHERE item_name = :item_name", db_engine,
+                                   params={"item_name": item_name})
+        if inventory_df.empty:
+            return f"Item {item_name} not found in inventory."
+
+        price = inventory_df.iloc[0]["unit_price"]
+        stock_level_df = get_stock_level(item_name, as_of_date)
+        current_stock = stock_level_df.iloc[0]['current_stock']
+
+        # Use the helper function to estimate delivery
+        delivery_date = get_supplier_delivery_date(as_of_date, quantity)
+
+        return (f"Item: {item_name}, Price per unit: ${price}, "
+                f"Availability: {current_stock} units. "
+                f"For an order of {quantity} units, the estimated delivery date is {delivery_date}.")
+    except Exception as e:
+        return f"Error getting pricing and availability: {e}"
 
 # Tools for ordering agent
+@tool
+def finalize_order(item_name: str, quantity: int, price: float, date: str) -> str:
+    """
+    Finalizes a customer's order by creating a 'sales' transaction.
+
+    Args:
+        item_name (str): The name of the item being ordered.
+        quantity (int): The number of units being ordered.
+        price (float): The total price of the order.
+        date (str): The date of the order, in YYYY-MM-DD format.
+
+    Returns:
+        A string confirming the order and providing a transaction ID, or an error message.
+    """
+    try:
+        stock_level_df = get_stock_level(item_name, date)
+        if stock_level_df.empty or stock_level_df.iloc[0]["current_stock"] < quantity:
+            return f"Insufficient stock for {item_name}. Order cannot be finalized."
+
+        transaction_id = create_transaction(item_name, "sales", quantity, price, date)
+        return f"Order finalized successfully. Transaction ID: {transaction_id}"
+    except Exception as e:
+        return f"Error finalizing order: {e}"
 
 
 # Set up your agents and create an orchestration agent that will manage them.
+class InventoryAgent(ToolCallingAgent):
+    """Agent for managing inventory."""
+    def __init__(self, model: OpenAIServerModel):
+        super().__init__(
+            tools=[check_stock_levels, check_reorder_status, place_stock_order],
+            model=model,
+            name="inventory_agent",
+            description="Agent for managing inventory. Check stock levels, determine if items need to be reordered, and place new stock orders.",
+        )
+
+class QuotingAgent(ToolCallingAgent):
+    """Agent for providing quotes."""
+    def __init__(self, model: OpenAIServerModel):
+        super().__init__(
+            tools=[quote_history, get_pricing_and_availability],
+            model=model,
+            name="quoting_agent",
+            description="Agent for providing accurate quotes to customers by searching past quotes and checking current pricing and availability.",
+        )
+
+class OrderingAgent(ToolCallingAgent):
+    """Agent for finalizing orders."""
+    def __init__(self, model: OpenAIServerModel):
+        super().__init__(
+            tools=[finalize_order],
+            model=model,
+            name="ordering_agent",
+            description="Agent for finalizing customer orders by creating sales transactions in the database.",
+        )
+
+class OrchestratorAgent(ToolCallingAgent):
+    """Orchestrator agent for managing the multi-agent system."""
+    def __init__(self, model: OpenAIServerModel):
+        self.inventory_agent = InventoryAgent(model)
+        self.quoting_agent = QuotingAgent(model)
+        self.ordering_agent = OrderingAgent(model)
+
+        @tool
+        def delegate_to_inventory_agent(request: str) -> str:
+            """
+            Use this tool for inquiries about stock levels, inventory, and reordering supplies.
+
+            Args:
+                request (str): The user's request.
+
+            Returns:
+                The response from the inventory agent as a string.
+            """
+            print(f"Orchestrator determined intent: inventory")
+            return self.inventory_agent.run(request)
+
+        @tool
+        def delegate_to_quoting_agent(request: str) -> str:
+            """
+            Use this tool for requests for quotes, pricing, and product availability.
+
+            Args:
+                request (str): The user's request.
+
+            Returns:
+                The response from the quoting agent as a string.
+            """
+            print(f"Orchestrator determined intent: quoting")
+            return self.quoting_agent.run(request)
+
+        @tool
+        def delegate_to_ordering_agent(request: str) -> str:
+            """
+            Use this tool to finalize an order, place an order, or purchase items.
+
+            Args:
+                request (str): The user's request.
+
+            Returns:
+                The response from the ordering agent as a string.
+            """
+            print(f"Orchestrator determined intent: ordering")
+            return self.ordering_agent.run(request)
+
+        super().__init__(
+            tools=[delegate_to_inventory_agent, delegate_to_quoting_agent, delegate_to_ordering_agent],
+            model=model,
+            name="orchestrator_agent",
+            description="Orchestrator agent that determines the user's intent and delegates the task to the correct worker agent.",
+            system_prompt_template=(
+                "You are an orchestrator agent. Your job is to understand the user's request and delegate it to the appropriate agent "
+                "by calling ONE of the available tools. The request will include the current date, which is important context for the other agents. "
+                "Do not try to answer the user directly. If the intent is unclear, default to the quoting agent."
+            )
+        )
 
 
 # Run your test scenarios by writing them here. Make sure to keep track of them.
@@ -613,7 +851,7 @@ def search_quote_history(search_terms: List[str], limit: int = 5) -> List[Dict]:
 def run_test_scenarios():
     
     print("Initializing Database...")
-    init_database()
+    init_database(db_engine)
     try:
         quote_requests_sample = pd.read_csv("quote_requests_sample.csv")
         quote_requests_sample["request_date"] = pd.to_datetime(
@@ -646,6 +884,7 @@ def run_test_scenarios():
     ############
     ############
     ############
+    orchestrator = OrchestratorAgent(model)
 
     results = []
     for idx, row in quote_requests_sample.iterrows():
@@ -667,8 +906,7 @@ def run_test_scenarios():
         ############
         ############
         ############
-
-        # response = call_your_multi_agent_system(request_with_date)
+        response = orchestrator.run(request_with_date)
 
         # Update state
         report = generate_financial_report(request_date)
