@@ -591,7 +591,6 @@ def search_quote_history(search_terms: List[str], limit: int = 5) -> List[Dict]:
 
 # Set up and load your env parameters and instantiate your model.
 from smolagents import ToolCallingAgent, OpenAIServerModel, tool
-from openai import OpenAI
 
 # SET UP ENVIRONMENT AND MODEL
 dotenv.load_dotenv()
@@ -839,9 +838,14 @@ class OrchestratorAgent(ToolCallingAgent):
             name="orchestrator_agent",
             description="Orchestrator agent that determines the user's intent and delegates the task to the correct worker agent.",
             system_prompt_template=(
-                "You are an orchestrator agent. Your job is to understand the user's request and delegate it to the appropriate agent "
-                "by calling ONE of the available tools. The request will include the current date, which is important context for the other agents. "
-                "Do not try to answer the user directly. If the intent is unclear, default to the quoting agent."
+                "You are a master orchestrator agent. Your primary role is to understand a user's request and delegate it to the appropriate specialized agent. "
+                "Here is your workflow:\n"
+                "1. For inquiries about stock, inventory levels, or reordering, use the `delegate_to_inventory_agent` tool.\n"
+                "2. For requests for quotes, pricing, or product availability, use the `delegate_to_quoting_agent` tool.\n"
+                "3. To place or finalize an order, you must follow a strict two-step process:\n"
+                "   a. First, you MUST call `delegate_to_quoting_agent` to get the price and check for stock availability. You must extract the item name and quantity from the user's request to do this.\n"
+                "   b. After you have confirmed the item is in stock from the response, you MUST then call `delegate_to_ordering_agent` to finalize the transaction. You need to extract the item name, quantity, and total price from the conversation to make this call.\n"
+                "Do not try to answer the user directly. Your job is to call the correct tools in the correct sequence."
             )
         )
 
