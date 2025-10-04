@@ -1,6 +1,8 @@
 import pandas as pd
 import numpy as np
 import os
+import re
+from thefuzz import process
 import time
 import dotenv
 import ast
@@ -449,7 +451,6 @@ def get_cash_balance(as_of_date: Union[str, datetime]) -> float:
         print(f"Error getting cash balance: {e}")
         return 0.0
 
-
 def generate_financial_report(as_of_date: Union[str, datetime]) -> Dict:
     """
     Generate a complete financial report for the company as of a specific date.
@@ -519,7 +520,6 @@ def generate_financial_report(as_of_date: Union[str, datetime]) -> Dict:
         "inventory_summary": inventory_summary,
         "top_selling_products": top_selling_products,
     }
-
 
 def search_quote_history(search_terms: List[str], limit: int = 5) -> List[Dict]:
     """
@@ -769,32 +769,66 @@ def get_pricing_and_availability(item_name: str, quantity: int, as_of_date: str)
         unit_price = inventory_df.iloc[0]["unit_price"]
         stock_level_df = get_stock_level(item_name, as_of_date)
         current_stock = stock_level_df.iloc[0]['current_stock']
-        sale_commission = 1.05 # 5% our sale commission
-        # Apply strategic discounts
-        discount_rate = 0
-        if 100 < quantity <= 500:
-            discount_rate = 0.01  # 1% discount
-        elif quantity > 500:
-            discount_rate = 0.02  # 2% discount
 
-        total_price_before_discount = unit_price * quantity * sale_commission
-        discount_amount = total_price_before_discount * discount_rate
-        final_price = total_price_before_discount - discount_amount
-
-        discount_explanation = "No discount applied."
-        if discount_rate > 0:
-            discount_explanation = (f"A {discount_rate:.0%} bulk discount was applied, "
-                                    f"saving you ${discount_amount:.2f}.")
+        total_price = unit_price * quantity
 
         delivery_date = get_supplier_delivery_date(as_of_date, quantity)
 
         return (f"Item: {item_name}, Price per unit: ${unit_price:.2f}, "
-                f"Total for {quantity} units: ${final_price:.2f}. "
-                f"{discount_explanation} "
+                f"Total for {quantity} units: ${total_price:.2f}. "
                 f"Current Availability: {current_stock} units. "
                 f"Estimated delivery date: {delivery_date}.")
     except Exception as e:
         return f"Error getting pricing and availability: {e}"
+
+
+@tool
+def apply_commission_and_discount(base_quote_str: str, discount_rate: float) -> str:
+    """
+    Applies a standard 5% sales commission and a variable loyalty discount to a base quote.
+    The agent determines the discount rate based on quote history.
+
+    Args:
+        base_quote_str (str): The string output from the `get_pricing_and_availability` tool.
+        discount_rate (float): The loyalty discount rate to apply, as a decimal (e.g., 0.02 for 2%).
+
+    Returns:
+        A final quote string including commission and the specified discount.
+    """
+    try:
+        # Extract total price and quantity from the base quote string
+        price_match = re.search(r"Total for (\d+) units: \$([\d\.]+)\.", base_quote_str)
+        if not price_match:
+            return "Error: Could not parse base price from the quote string."
+
+        quantity = int(price_match.group(1))
+        base_price = float(price_match.group(2))
+
+        # Apply a standard 5% sales commission
+        sale_commission = 1.05
+        price_after_commission = base_price * sale_commission
+
+        # Apply the variable discount decided by the agent
+        discount_amount = base_price * discount_rate
+        final_price = price_after_commission - discount_amount
+
+        discount_explanation = ""
+        if discount_rate > 0:
+            discount_percentage = discount_rate * 100
+            discount_explanation += (
+                f" A {discount_percentage:.1f}% discount was also applied for your order, "
+                f"saving you an additional ${discount_amount:.2f}.")
+
+        # Replace the original total price with the new final price in the quote string
+        final_quote_str = re.sub(
+            r"Total for \d+ units: \$[\d\.]+\.",
+            f"Total for {quantity} units: ${final_price:.2f}. {discount_explanation}",
+            base_quote_str
+        )
+
+        return final_quote_str
+    except Exception as e:
+        return f"Error applying commission and discount: {e}"
 
 # Tools for ordering agent
 @tool
@@ -821,19 +855,94 @@ def finalize_order(item_name: str, quantity: int, price: float, date: str) -> st
     except Exception as e:
         return f"Error finalizing order: {e}"
 
+@tool
+def normalize_item_names(user_request: str, as_of_date: str) -> str:
+    """
+    Finds phrases in a user request that describe items, normalizes them against official
+    inventory names, and returns the request with the names replaced.
+    This preserves the original structure and context of the user's request.
+
+    Args:
+        user_request (str): The original user request string.
+        as_of_date (str): The date for checking inventory, in YYYY-MM-DD format.
+
+    Returns:
+        The user request string with item names normalized.
+    """
+    inventory_item_names = list(get_all_inventory(as_of_date).keys())
+    if not inventory_item_names:
+        return user_request
+
+    def find_and_replace(match):
+        # The part of the string that contains the quantity and units
+        quantity_and_units = match.group(1)
+        # The part of the string that is the item description
+        original_item_phrase = match.group(2).strip()
+
+        # Clean the phrase to improve matching accuracy by removing common, non-specific words
+        cleaned_phrase = re.sub(r'\([\w\s-]+\)', '', original_item_phrase, flags=re.IGNORECASE).strip()
+        cleaned_phrase = re.sub(r'\b(high-quality|white|assorted colors|various colors|standard)\b', '', cleaned_phrase, flags=re.IGNORECASE).strip()
+
+        if not cleaned_phrase:
+            return match.group(0) # Return original full match if cleaning results in empty string
+
+        # Find the best match in the inventory for the cleaned phrase
+        best_match, score = process.extractOne(cleaned_phrase, inventory_item_names)
+
+        # If confidence is high, reconstruct the string with the normalized item name
+        if score > 80:
+            return f"{quantity_and_units}{best_match}"
+        else:
+            # Otherwise, return the original matched text without changes
+            return match.group(0)
+
+    # This regex captures two groups:
+    # 1. The quantity and any common units (e.g., "200 sheets of ").
+    # 2. The descriptive item phrase that follows (e.g., "A4 glossy paper").
+    # It stops capturing before a newline, comma, or the word "and".
+    # The units part now handles both singular and plural forms (e.g., sheet/sheets).
+    pattern = re.compile(
+        r'(\d[\d,]*\s+(?:sheets? of|rolls? of|reams? of|packets? of|of|)?\s*)([a-zA-Z0-9\s\(\)\'\"-]+?)(?=\n|,|\s+and\s+|\.|$)',
+        re.IGNORECASE
+    )
+
+    return pattern.sub(find_and_replace, user_request)
+
 
 # Set up your agents and create an orchestration agent that will manage them.
-INVENTORY_SYSTEM_PROMPT = """You are a specialized agent for managing inventory. Your goal is to respond to tasks by calling the correct tool.
+INVENTORY_SYSTEM_PROMPT = """You are a specialized agent for managing inventory. Your goal is to proactively maintain stock levels and respond to specific inventory-related tasks by following a strict workflow and rules.
 
 Here are your available tools:
 - `check_stock_levels`: For checking a specific item's stock.
-- `check_reorder_status`: For checking if a specific item needs reordering.
-- `place_stock_order`: For ordering more of a specific item.
+- `check_reorder_status`: For checking if an item's stock is below the minimum threshold.
+- `place_stock_order`: For ordering more of a specific item. **This tool has strict usage rules.**
+- `check_cash_balance`: For checking the company's cash balance before placing an order.
 - `get_full_inventory_report`: For a report of all items in stock.
-- `check_cash_balance`: For checking the company's cash.
-- `get_company_financials`: For a full financial report.
+- `get_company_financials`: For a full financial report containing item unit prices.
 
-If a request is ambiguous or you cannot fulfill it, you MUST respond with a summary of the inventory or best answer to your understanding after clearly mentioning that request was ambigious and you cannot fulfill it and your capabilities and ask for clarification. DONOT place any order if request is ambigious.
+**Your Primary Workflow:**
+
+You MUST follow this workflow for EVERY task you receive:
+
+1.  **Proactive Stock Maintenance (Run First)**:
+    a.  Use `get_full_inventory_report` to get a list of all items currently in stock.
+    b.  For each item in the report, use `check_reorder_status` to identify any items with stock below the minimum required level.
+    c.  If any item needs to be reordered, you MUST determine the reorder quantity and then follow the **`place_stock_order` Usage Rule** below to attempt a reorder. The quantity to reorder is `(min_stock_level - current_stock) + 50`.
+
+2.  **Execute Assigned Task**: After completing the proactive stock maintenance, proceed to execute the specific task you were originally assigned (e.g., checking stock, placing a specific order). You MUST adhere to all tool usage rules.
+
+**Tool Usage Rules:**
+
+- **`place_stock_order` Usage Rule**: You MUST follow these steps in sequence BEFORE every single call to `place_stock_order`:
+    1.  **Determine Order Cost**: You must know the `item_name`, `quantity`, and `unit_price`.
+        - If the task does not provide the `unit_price`, use `get_company_financials` to find it.
+        - Calculate the total order cost: `quantity * unit_price`.
+    2.  **Check Funds**: Use `check_cash_balance` to get the current cash balance.
+    3.  **Verify and Execute**: Compare the total order cost to the cash balance.
+        - **If cash balance is greater than or equal to the order cost**, you are authorized to call `place_stock_order`.
+        - **If cash balance is insufficient**, you MUST NOT call `place_stock_order`. You must report that the order failed due to insufficient funds.
+
+**Handle Ambiguity**: If a request is ambiguous or you cannot fulfill it, you MUST respond with a summary of your capabilities and ask for clarification. Do not place any orders if the request is ambiguous.
 """
 
 class InventoryAgent(ToolCallingAgent):
@@ -870,14 +979,25 @@ class InventoryAgent(ToolCallingAgent):
             ),
         )
 
-
-QUOTING_SYSTEM_PROMPT = """You are a specialized agent for customer quotes. Your goal is to respond to tasks by calling the correct tool.
+QUOTING_SYSTEM_PROMPT = """You are a specialized agent for customer quotes. Your goal is to generate a final, consolidated quote for all items in a customer's request by following a strict, multi-step process.
 
 Here are your available tools:
-- `quote_history`: For searching past quotes based on a customer's request.
-- `get_pricing_and_availability`: For providing a price, availability, and delivery date for a specific item and quantity.
+- `get_pricing_and_availability`: For getting the base price, availability, and delivery date for a single item.
+- `quote_history`: For searching past quotes based on a customer's request to inform discount decisions.
+- `apply_commission_and_discount`: For applying a sales commission and a variable loyalty discount to a single item's base quote.
 
-If a request is ambiguous or you cannot fulfill it, you MUST respond with a summary of the system at your end or best answer to your understanding after clearly mentioning that request was ambigious and you cannot fulfill it and your capabilities and ask for clarification. DONOT provide quote if request is ambigious.
+**Your Primary Workflow:**
+
+You MUST follow this workflow for EVERY task you receive. If the request contains multiple items, you MUST repeat the following steps for EACH item before providing a final, consolidated answer.
+
+1.  **Process Each Item Individually**: For each item in the request:
+    a.  **Get Base Quote**: Call `get_pricing_and_availability` to get the fundamental details for the item and its requested quantity.
+    b.  **Check History**: Call `quote_history` using the customer's request to see if there are any relevant past orders or discounts that might apply.
+    c.  **Analyze and Decide Discount**: Review the output from `quote_history`. Based on the customer's past orders (e.g., large quantities, frequent orders, or previously applied discounts), decide on a reasonable loyalty discount rate for the current item. The rate MUST be a decimal between 0.0 (no discount) and 0.03 (max 3% discount). If no relevant history is found, you MUST use a discount rate of 0.0.
+    d.  **Generate Item Quote**: Call `apply_commission_and_discount` with the base quote string from step 'a' and the discount rate you decided on in step 'c'. This will generate the complete quote for this single item.
+2.  **Consolidate and Finalize**: After processing all items, combine the individual quotes into a single, clear, and itemized response for the user.
+
+If a request is ambiguous or you cannot fulfill it, you MUST respond with a summary of your capabilities and ask for clarification. Do not provide a quote if the request is ambiguous.
 """
 
 class QuotingAgent(ToolCallingAgent):
@@ -894,10 +1014,13 @@ class QuotingAgent(ToolCallingAgent):
         prompt_templates["system_prompt"] = QUOTING_SYSTEM_PROMPT
 
         super().__init__(
-            tools=[quote_history, get_pricing_and_availability],
+            tools=[get_pricing_and_availability, quote_history, apply_commission_and_discount],
             model=model,
             name="quoting_agent",
-            description="Provides quotes, checks pricing, stock availability, and delivery timelines. Applies bulk discounts where applicable and can search historical quote data.",
+            description=(
+                "Generates final customer quotes. It gets base pricing, checks historical data, "
+                "decides on a reasonable loyalty discount, and applies a standard sales commission."
+            ),
             prompt_templates=prompt_templates,
         )
 
@@ -930,26 +1053,37 @@ class OrderingAgent(ToolCallingAgent):
             prompt_templates=prompt_templates,
         )
 
-ORCHESTRATOR_SYSTEM_PROMPT = """You are a master orchestrator agent acting as an expert planner and delegator. Your goal is to fulfill user requests by creating and executing an efficient, step-by-step plan.
+ORCHESTRATOR_SYSTEM_PROMPT = """You are a Manager acting as an expert and delegator. Your goal is to fulfill user requests by executing an efficient, step-by-step workflow.
 
 Here are the available agents and their responsibilities:
-- **inventory_agent**: Use for inquiries about stock levels, inventory, and reordering supplies.
-- **quoting_agent**: Use for requests for quotes, pricing, and product availability.
-- **ordering_agent**: Use to finalize an order, place an order, or purchase items.
+- **inventory_agent**: Use for inquiries about stock levels and for executing the internal reordering workflow if stock is insufficient for a customer order.
+- **quoting_agent**: Use for requests for quotes, pricing, and checking product availability.
+- **ordering_agent**: Use to finalize a customer order by creating a sales transaction.
 
-Here is your adaptive workflow:
-1.  **Plan**: First, analyze the user's request to create a minimal, step-by-step plan. Your plan must detail which agent to call and in what sequence to achieve the user's goal.
-    - For any request that involves placing an order, your plan MUST first confirm price and availability by calling the `quoting_agent`. Only after confirming the item is in stock should your plan include a step to call the `ordering_agent`.
-2.  **Execute & Review**: Execute your plan one step at a time by calling the appropriate agent.
-    - `task` is a detailed string that describes the specific goal for the agent. You MUST include all relevant context, especially the date for any date-sensitive tasks (like checking stock or getting prices).
-    - `additional_args` an empty dictionary MUST be passed: {} even if there are no additional arguments.
-    - **Example**: `quoting_agent(task="Get a price quote for 200 sheets of A4 glossy paper as of 2025-04-01", additional_args={})`
-3.  **Finalize**: When the plan is complete, you MUST synthesize the final answer for the user. Your response should be a clean, natural language summary.
+You also have access to the following tool:
+- `normalize_item_names`: Use this tool first to clean up the user's request by matching item names to the official inventory and replacing them in the request string.
+
+ **Execution Rules**: Execute your plan one step at a time by calling the appropriate agent. Always pass these 2 arguments `task` and `additional_args`. **STRICTLY ONLY** pass these 2 arguments and nothing else.
+- `task` is a detailed string that describes the specific goal for the agent. You MUST include all relevant context, especially the date for any date-sensitive tasks and task_outcome.
+- `additional_args` MUST be an empty dictionary: `{}` if no additional_args are available.
+
+Here is your `step-by-step` workflow:
+**Execution Workflow for Orders**: For any request that involves placing an order, you MUST follow this specific sequence while following `Execution Rules` given earlier:
+    1.  **Normalize Request**: Call the `normalize_item_names` tool with the original user request and the request date. This will return a new version of the request with all item names corrected to match the official inventory. Use this normalized request for all subsequent steps.
+    2.  **Get Quote**: Call the `quoting_agent` to get a quote for each item in the normalized request. The quote will include the current stock level and an estimated delivery date.
+    3.  If current stock is sufficient or if the estimated delivery date matches the user request. User request can be fulfilled.
+        - **If current stock is sufficient**: Your next step is to call the `ordering_agent` to `finalize_order`.
+        - **Otherwise If current stock is insufficient**: Your next step is to call the `inventory_agent` to reorder the necessary stock. The task should specify the item, the quantity needed, and the user's timeline.
+        **Follow-up After Stock Order Attempt**:
+        - If the `inventory_agent` reports that the reorder was successful, your next step is to call the `ordering_agent` to `finalize_order`. 
+        - If the `inventory_agent` reports that the reorder failed due to valid reason (e.g., due to insufficient funds), the item CANNOT be fulfilled. You MUST NOT proceed with the order. You MUST retry the reorder up to 2 more times before marking it as failed. 
+    4.  If current stock is insufficient and the estimated delivery date does not matches the user request either. User request can not be fulfilled.
+        - simply send the quote you have from `quoting_agent` to the user.
+    **Finalize**: When the plan is complete, you MUST synthesize the final answer for the user.
+    - If the order was successful, confirm it.
+    - If the order could not be fulfilled, explain why (e.g., "the item is out of stock and could not be reordered in time") and provide the quote for the quantity that is available.
     - DO NOT include tool names, function calls, or raw data logs in your final answer.
-    - Explain the outcome clearly. For example, if a discount was applied, mention it. If an item is out of stock, state it clearly.
 """
-
-
 
 class OrchestratorAgent(ToolCallingAgent):
     """
@@ -973,7 +1107,7 @@ class OrchestratorAgent(ToolCallingAgent):
         # Initialize the parent ToolCallingAgent
         super().__init__(
             model=model,
-            tools=[],
+            tools=[normalize_item_names],
             # Pass the specialized agents as managed_agents for proper delegation
             managed_agents=[
                 inventory_agent,
@@ -982,8 +1116,6 @@ class OrchestratorAgent(ToolCallingAgent):
             ],
             # Pass the customized prompt templates
             prompt_templates=prompt_templates,
-            planning_interval=3,
-            max_tool_threads=3,
             max_steps=10
         )
 

@@ -4,3 +4,5 @@ openai==1.76.0
 SQLAlchemy==2.0.40
 python-dotenv==1.1.0
 smolagents
+thefuzz
+python-Levenshtein
