@@ -769,15 +769,15 @@ def get_pricing_and_availability(item_name: str, quantity: int, as_of_date: str)
         unit_price = inventory_df.iloc[0]["unit_price"]
         stock_level_df = get_stock_level(item_name, as_of_date)
         current_stock = stock_level_df.iloc[0]['current_stock']
-
+        sale_commission = 1.05 # 5% our sale commission
         # Apply strategic discounts
         discount_rate = 0
         if 100 < quantity <= 500:
-            discount_rate = 0.05  # 5% discount
+            discount_rate = 0.01  # 1% discount
         elif quantity > 500:
-            discount_rate = 0.10  # 10% discount
+            discount_rate = 0.02  # 2% discount
 
-        total_price_before_discount = unit_price * quantity
+        total_price_before_discount = unit_price * quantity * sale_commission
         discount_amount = total_price_before_discount * discount_rate
         final_price = total_price_before_discount - discount_amount
 
@@ -823,9 +823,32 @@ def finalize_order(item_name: str, quantity: int, price: float, date: str) -> st
 
 
 # Set up your agents and create an orchestration agent that will manage them.
+INVENTORY_SYSTEM_PROMPT = """You are a specialized agent for managing inventory. Your goal is to respond to tasks by calling the correct tool.
+
+Here are your available tools:
+- `check_stock_levels`: For checking a specific item's stock.
+- `check_reorder_status`: For checking if a specific item needs reordering.
+- `place_stock_order`: For ordering more of a specific item.
+- `get_full_inventory_report`: For a report of all items in stock.
+- `check_cash_balance`: For checking the company's cash.
+- `get_company_financials`: For a full financial report.
+
+If a request is ambiguous or you cannot fulfill it, you MUST respond with a summary of the inventory or best answer to your understanding after clearly mentioning that request was ambigious and you cannot fulfill it and your capabilities and ask for clarification. DONOT place any order if request is ambigious.
+"""
+
 class InventoryAgent(ToolCallingAgent):
-    """Agent for managing inventory."""
+    """
+    Manages all inventory-related tasks, including checking stock levels, assessing reorder needs,
+    and executing the stock reordering workflow.
+    """
     def __init__(self, model: OpenAIServerModel):
+        # Load default prompt templates
+        prompt_templates = yaml.safe_load(
+            importlib.resources.files("smolagents.prompts").joinpath("toolcalling_agent.yaml").read_text()
+        )
+        # Set the custom system prompt
+        prompt_templates["system_prompt"] = INVENTORY_SYSTEM_PROMPT
+
         super().__init__(
             tools=[
                 check_stock_levels,
@@ -837,36 +860,77 @@ class InventoryAgent(ToolCallingAgent):
             ],
             model=model,
             name="inventory_agent",
+            prompt_templates=prompt_templates,
             description=(
                 "Agent for managing inventory. Handles inquiries about stock levels and inventory reports. "
                 "It is also responsible for the reordering workflow: "
                 "1. Check if an item needs reordering. "
                 "2. If it does, check the company's cash balance to ensure sufficient funds. "
                 "3. If there is enough cash, place a stock order to replenish the inventory."
-            )
+            ),
         )
 
+
+QUOTING_SYSTEM_PROMPT = """You are a specialized agent for customer quotes. Your goal is to respond to tasks by calling the correct tool.
+
+Here are your available tools:
+- `quote_history`: For searching past quotes based on a customer's request.
+- `get_pricing_and_availability`: For providing a price, availability, and delivery date for a specific item and quantity.
+
+If a request is ambiguous or you cannot fulfill it, you MUST respond with a summary of the system at your end or best answer to your understanding after clearly mentioning that request was ambigious and you cannot fulfill it and your capabilities and ask for clarification. DONOT provide quote if request is ambigious.
+"""
+
 class QuotingAgent(ToolCallingAgent):
-    """Agent for providing quotes."""
+    """
+    Handles all customer-facing quoting tasks. It provides pricing, checks item availability,
+    and searches historical quote data to inform its responses.
+    """
     def __init__(self, model: OpenAIServerModel):
+        # Load default prompt templates
+        prompt_templates = yaml.safe_load(
+            importlib.resources.files("smolagents.prompts").joinpath("toolcalling_agent.yaml").read_text()
+        )
+        # Set the custom system prompt
+        prompt_templates["system_prompt"] = QUOTING_SYSTEM_PROMPT
+
         super().__init__(
             tools=[quote_history, get_pricing_and_availability],
             model=model,
             name="quoting_agent",
-            description="Agent for providing accurate quotes to customers by searching past quotes and checking current pricing and availability.",
+            description="Provides quotes, checks pricing, stock availability, and delivery timelines. Applies bulk discounts where applicable and can search historical quote data.",
+            prompt_templates=prompt_templates,
         )
 
+ORDERING_SYSTEM_PROMPT = """You are a specialized agent for finalizing customer orders. Your goal is to respond to tasks by calling the correct tool.
+
+Here is your available tool:
+- `finalize_order`: For creating a sales transaction for a specific item, quantity, and price.
+
+If a request is ambiguous or you cannot fulfill it, you MUST respond with a summary of the system at your end or best answer to your understanding after clearly mentioning that request was ambigious and you cannot fulfill it and your capabilities and ask for clarification. DONOT execute order if request is ambigious.
+"""
+
 class OrderingAgent(ToolCallingAgent):
-    """Agent for finalizing orders."""
+    """
+    Responsible for finalizing sales. It validates stock availability before creating
+    a sales transaction in the database to complete a customer's purchase.
+    """
     def __init__(self, model: OpenAIServerModel):
+        # Load default prompt templates
+        prompt_templates = yaml.safe_load(
+            importlib.resources.files("smolagents.prompts").joinpath("toolcalling_agent.yaml").read_text()
+        )
+        # Set the custom system prompt
+        prompt_templates["system_prompt"] = ORDERING_SYSTEM_PROMPT
+
         super().__init__(
             tools=[finalize_order],
             model=model,
             name="ordering_agent",
-            description="Agent for finalizing customer orders by creating sales transactions in the database.",
+            description="Finalizes customer orders. It confirms stock availability and then creates a sales transaction to complete the purchase.",
+            prompt_templates=prompt_templates,
         )
 
-ORCHESTRATOR_SYSTEM_PROMPT = """You are a master orchestrator agent acting as an expert planner and delegator. Your goal is to fulfill user requests in the most efficient way possible using a dynamic, adaptive workflow.
+ORCHESTRATOR_SYSTEM_PROMPT = """You are a master orchestrator agent acting as an expert planner and delegator. Your goal is to fulfill user requests by creating and executing an efficient, step-by-step plan.
 
 Here are the available agents and their responsibilities:
 - **inventory_agent**: Use for inquiries about stock levels, inventory, and reordering supplies.
@@ -874,22 +938,24 @@ Here are the available agents and their responsibilities:
 - **ordering_agent**: Use to finalize an order, place an order, or purchase items.
 
 Here is your adaptive workflow:
-1.  **Plan**: First, analyze the user's request to create a minimal, step-by-step plan. Your plan should use the fewest steps necessary to achieve the user's goal.
-2.  **Execute & Review**: Execute your plan one step at a time by calling the appropriate agent. After each step, review the outcome.
-    - If the plan remains valid and optimal, proceed to the next step.
-    - If the outcome requires a change (e.g., an item is out of stock), you MUST revise your plan to find the new most efficient path. Do not change the plan unnecessarily.
-3.  **Special Rule for Ordering**: For placing or finalizing an order, you must follow a strict two-step process:
-    a. First, you MUST call the `quoting_agent` to get the price and check for stock availability.
-    b. Only after confirming the item is in stock, you MUST then call the `ordering_agent` to finalize the transaction. This rule is a mandatory part of any plan involving an order.
-4.  **Finalize**: When the plan is complete, you MUST synthesize the final answer for the user. Your response should be a clean, natural language summary.
+1.  **Plan**: First, analyze the user's request to create a minimal, step-by-step plan. Your plan must detail which agent to call and in what sequence to achieve the user's goal.
+    - For any request that involves placing an order, your plan MUST first confirm price and availability by calling the `quoting_agent`. Only after confirming the item is in stock should your plan include a step to call the `ordering_agent`.
+2.  **Execute & Review**: Execute your plan one step at a time by calling the appropriate agent.
+    - `task` is a detailed string that describes the specific goal for the agent. You MUST include all relevant context, especially the date for any date-sensitive tasks (like checking stock or getting prices).
+    - `additional_args` an empty dictionary MUST be passed: {} even if there are no additional arguments.
+    - **Example**: `quoting_agent(task="Get a price quote for 200 sheets of A4 glossy paper as of 2025-04-01", additional_args={})`
+3.  **Finalize**: When the plan is complete, you MUST synthesize the final answer for the user. Your response should be a clean, natural language summary.
     - DO NOT include tool names, function calls, or raw data logs in your final answer.
     - Explain the outcome clearly. For example, if a discount was applied, mention it. If an item is out of stock, state it clearly.
 """
 
 
+
 class OrchestratorAgent(ToolCallingAgent):
     """
-    The OrchestratorAgent is the master agent that delegates tasks to other specialized agents.
+    Acts as an expert planner and delegator. It analyzes user requests, creates an efficient,
+    step-by-step plan, and delegates tasks to specialized worker agents. It dynamically reviews
+    and adapts the plan based on intermediate results to ensure optimal workflow.
     """
     def __init__(self, model):
         # Instantiate the specialized agents
@@ -916,6 +982,8 @@ class OrchestratorAgent(ToolCallingAgent):
             ],
             # Pass the customized prompt templates
             prompt_templates=prompt_templates,
+            planning_interval=3,
+            max_tool_threads=3,
             max_steps=10
         )
 
