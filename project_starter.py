@@ -2,7 +2,6 @@ import pandas as pd
 import numpy as np
 import os
 import re
-from thefuzz import process
 import time
 import dotenv
 import ast
@@ -10,6 +9,8 @@ from sqlalchemy.sql import text
 from datetime import datetime, timedelta
 from typing import Dict, List, Union
 from sqlalchemy import create_engine, Engine
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
 
 # Create an SQLite database
 db_engine = create_engine("sqlite:///munder_difflin.db")
@@ -597,7 +598,7 @@ import importlib.resources
 # SET UP ENVIRONMENT AND MODEL
 dotenv.load_dotenv()
 model = OpenAIServerModel(
-    model_id="gpt-3.5-turbo", #gpt-4o-mini
+    model_id="gpt-3.5-turbo", #gpt-4o-mini gpt-3.5-turbo gpt-5-mini
     api_base="https://openai.vocareum.com/v1",
     api_key=os.getenv("OPENAI_API_KEY"),
 )
@@ -855,23 +856,61 @@ def finalize_order(item_name: str, quantity: int, price: float, date: str) -> st
     except Exception as e:
         return f"Error finalizing order: {e}"
 
+class VectorInventorySearch:
+    """
+    A class to find the best inventory item match for a query using TF-IDF and cosine similarity.
+    """
+    def __init__(self, inventory_items: List[str]):
+        self.vectorizer = TfidfVectorizer(stop_words='english')
+        self.inventory_items = inventory_items
+        if self.inventory_items:
+            self.inventory_vectors = self.vectorizer.fit_transform(self.inventory_items)
+        else:
+            self.inventory_vectors = None
+
+    def search(self, query: str, threshold: float = 0.3) -> (Union[str, None], float):
+        """
+        Searches for the best match for a query string in the inventory.
+
+        Args:
+            query (str): The search query (e.g., a cleaned item phrase).
+            threshold (float): The minimum similarity score to consider a match.
+
+        Returns:
+            A tuple containing the best matching item name and the similarity score,
+            or (None, 0) if no match is found above the threshold.
+        """
+        if not self.inventory_items or self.inventory_vectors is None:
+            return None, 0.0
+
+        query_vector = self.vectorizer.transform([query])
+        similarities = cosine_similarity(query_vector, self.inventory_vectors).flatten()
+
+        best_match_index = np.argmax(similarities)
+        score = similarities[best_match_index]
+
+        if score >= threshold:
+            best_match = self.inventory_items[best_match_index]
+            return best_match, score
+        else:
+            return None, 0.0
+
+# Initialize the vector search ONCE with all possible inventory items.
+vector_search_global = VectorInventorySearch([item["item_name"] for item in paper_supplies])
+
 @tool
-def normalize_item_names(user_request: str, as_of_date: str) -> str:
+def normalize_item_names(user_request: str) -> str:
     """
     Finds phrases in a user request that describe items, normalizes them against official
-    inventory names, and returns the request with the names replaced.
+    inventory names using vector similarity, and returns the request with the names replaced.
     This preserves the original structure and context of the user's request.
 
     Args:
         user_request (str): The original user request string.
-        as_of_date (str): The date for checking inventory, in YYYY-MM-DD format.
 
     Returns:
         The user request string with item names normalized.
     """
-    inventory_item_names = list(get_all_inventory(as_of_date).keys())
-    if not inventory_item_names:
-        return user_request
 
     def find_and_replace(match):
         # The part of the string that contains the quantity and units
@@ -881,16 +920,16 @@ def normalize_item_names(user_request: str, as_of_date: str) -> str:
 
         # Clean the phrase to improve matching accuracy by removing common, non-specific words
         cleaned_phrase = re.sub(r'\([\w\s-]+\)', '', original_item_phrase, flags=re.IGNORECASE).strip()
-        cleaned_phrase = re.sub(r'\b(high-quality|white|assorted colors|various colors|standard)\b', '', cleaned_phrase, flags=re.IGNORECASE).strip()
+        cleaned_phrase = re.sub(r'\b(high-quality|heavy|white|assorted colors|various colors|standard|printer)\b', '', cleaned_phrase, flags=re.IGNORECASE).strip()
 
         if not cleaned_phrase:
             return match.group(0) # Return original full match if cleaning results in empty string
 
-        # Find the best match in the inventory for the cleaned phrase
-        best_match, score = process.extractOne(cleaned_phrase, inventory_item_names)
+        # Find the best match in the inventory using vector similarity
+        best_match, score = vector_search_global.search(cleaned_phrase, threshold=0.3)
 
         # If confidence is high, reconstruct the string with the normalized item name
-        if score > 80:
+        if best_match:
             return f"{quantity_and_units}{best_match}"
         else:
             # Otherwise, return the original matched text without changes
@@ -902,7 +941,7 @@ def normalize_item_names(user_request: str, as_of_date: str) -> str:
     # It stops capturing before a newline, comma, or the word "and".
     # The units part now handles both singular and plural forms (e.g., sheet/sheets).
     pattern = re.compile(
-        r'(\d[\d,]*\s+(?:sheets? of|rolls? of|reams? of|packets? of|of|)?\s*)([a-zA-Z0-9\s\(\)\'\"-]+?)(?=\n|,|\s+and\s+|\.|$)',
+        r'(\d[\d,]*\s+(?:sheets? of|reams? of|packets? of|of|)?\s*)([a-zA-Z0-9\s\(\)\'\"-]+?)(?=\n|,|\s+and\s+|\.|$)',
         re.IGNORECASE
     )
 
@@ -1053,36 +1092,34 @@ class OrderingAgent(ToolCallingAgent):
             prompt_templates=prompt_templates,
         )
 
-ORCHESTRATOR_SYSTEM_PROMPT = """You are a Manager acting as an expert and delegator. Your goal is to fulfill user requests by executing an efficient, step-by-step workflow.
+ORCHESTRATOR_SYSTEM_PROMPT = """You are a master orchestrator agent acting as an expert and delegator. Your goal is to fulfill user requests by executing an efficient, step-by-step workflow.
 
 Here are the available agents and their responsibilities:
 - **inventory_agent**: Use for inquiries about stock levels and for executing the internal reordering workflow if stock is insufficient for a customer order.
 - **quoting_agent**: Use for requests for quotes, pricing, and checking product availability.
 - **ordering_agent**: Use to finalize a customer order by creating a sales transaction.
 
-You also have access to the following tool:
-- `normalize_item_names`: Use this tool first to clean up the user's request by matching item names to the official inventory and replacing them in the request string.
-
- **Execution Rules**: Execute your plan one step at a time by calling the appropriate agent. Always pass these 2 arguments `task` and `additional_args`. **STRICTLY ONLY** pass these 2 arguments and nothing else.
+**Execution Rules**: Execute your plan one step at a time by calling the appropriate agent. Always pass these 2 arguments `task` and `additional_args`. **STRICTLY ONLY** pass these 2 arguments and nothing else.
 - `task` is a detailed string that describes the specific goal for the agent. You MUST include all relevant context, especially the date for any date-sensitive tasks and task_outcome.
 - `additional_args` MUST be an empty dictionary: `{}` if no additional_args are available.
+- **Arguments `task_outcome`, `task_outcome_detailed`, `additional_context`, `details`, `extra_context`, `additional_details` **MUST NOT** be in the tool's input schema.**
 
 Here is your `step-by-step` workflow:
-**Execution Workflow for Orders**: For any request that involves placing an order, you MUST follow this specific sequence while following `Execution Rules` given earlier:
-    1.  **Normalize Request**: Call the `normalize_item_names` tool with the original user request and the request date. This will return a new version of the request with all item names corrected to match the official inventory. Use this normalized request for all subsequent steps.
-    2.  **Get Quote**: Call the `quoting_agent` to get a quote for each item in the normalized request. The quote will include the current stock level and an estimated delivery date.
-    3.  If current stock is sufficient or if the estimated delivery date matches the user request. User request can be fulfilled.
-        - **If current stock is sufficient**: Your next step is to call the `ordering_agent` to `finalize_order`.
-        - **Otherwise If current stock is insufficient**: Your next step is to call the `inventory_agent` to reorder the necessary stock. The task should specify the item, the quantity needed, and the user's timeline.
-        **Follow-up After Stock Order Attempt**:
-        - If the `inventory_agent` reports that the reorder was successful, your next step is to call the `ordering_agent` to `finalize_order`. 
-        - If the `inventory_agent` reports that the reorder failed due to valid reason (e.g., due to insufficient funds), the item CANNOT be fulfilled. You MUST NOT proceed with the order. You MUST retry the reorder up to 2 more times before marking it as failed. 
-    4.  If current stock is insufficient and the estimated delivery date does not matches the user request either. User request can not be fulfilled.
-        - simply send the quote you have from `quoting_agent` to the user.
-    **Finalize**: When the plan is complete, you MUST synthesize the final answer for the user.
-    - If the order was successful, confirm it.
-    - If the order could not be fulfilled, explain why (e.g., "the item is out of stock and could not be reordered in time") and provide the quote for the quantity that is available.
-    - DO NOT include tool names, function calls, or raw data logs in your final answer.
+**Execution Workflow for Orders**: For any request that involves placing an order, you **MUST STRICTLY follow these steps** while abiding `Execution Rules` given earlier:
+    Step 1.  **Get Quote**: Call the `quoting_agent` to get a quote for each item in the user request. The quote will include the current stock level and an estimated delivery date.
+    Step 2.  **Evaluate Quote**: Based on the quote, if either **current stock is sufficient** or **the estimated delivery date is with in the requested delivery date**, User request can be fulfilled.
+                - **If current stock is sufficient**: Your next step is to call the `ordering_agent` to `finalize_order` along with arguments: 'item_name', 'quantity', 'total_price', 'request_date' from the quote. Make sure exact arguments are passed.
+                - **Otherwise If current stock is insufficient but the estimated delivery date is less than or equal to delivery date requested by user**: Your next step is to call the `inventory_agent` to reorder the necessary stock. The task should specify the item, the quantity needed, and the user's timeline.
+                **Follow-up After Stock Order Attempt**:
+                - If the `inventory_agent` reports that the reorder was successful, your next step is to call the `ordering_agent` to `finalize_order` along with arguments: 'item_name', 'quantity', 'total_price', 'request_date' from the quote. Make sure exact arguments are passed.
+                - If the `inventory_agent` reports that the reorder failed due to valid reason (e.g., due to insufficient funds), the item CANNOT be fulfilled. You MUST NOT proceed with the order.
+    Step 3.  If current stock is insufficient and the estimated delivery date is not with in the requested delivery date either. User request can not be fulfilled.
+                - simply send the quote to the user.
+    Step 4.  **Finalize**: When the plan is complete, you MUST synthesize the final answer for the user. Your response should be a clean, natural language summary.
+                - If the order was successful, confirm it.
+                - If the order could not be fulfilled, explain why (e.g., "the item is out of stock and could not be reordered in time") and provide the quote for the quantity that is available.
+                - DO NOT include tool names, function calls, or raw data logs in your final answer.
+                - Explain the outcome clearly. For example, if a discount was applied, mention it. If an item is out of stock, state it clearly.
 """
 
 class OrchestratorAgent(ToolCallingAgent):
@@ -1107,7 +1144,7 @@ class OrchestratorAgent(ToolCallingAgent):
         # Initialize the parent ToolCallingAgent
         super().__init__(
             model=model,
-            tools=[normalize_item_names],
+            tools=[],
             # Pass the specialized agents as managed_agents for proper delegation
             managed_agents=[
                 inventory_agent,
@@ -1171,7 +1208,7 @@ def run_test_scenarios():
         print(f"Inventory Value: ${current_inventory:.2f}")
 
         # Process request
-        request_with_date = f"{row['request']} (Date of request: {request_date})"
+        request_with_date = f"{normalize_item_names(row['request'])} (Date of request: {request_date})"
 
         ############
         ############
