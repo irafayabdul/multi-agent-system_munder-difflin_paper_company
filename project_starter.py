@@ -599,7 +599,7 @@ from smolagents import ToolCallingAgent, OpenAIServerModel, tool
 # SET UP ENVIRONMENT AND MODEL
 dotenv.load_dotenv()
 model = OpenAIServerModel(
-    model_id="gpt-5-mini", #gpt-4o-mini gpt-3.5-turbo gpt-5-mini
+    model_id="gpt-3.5-turbo",
     api_base="https://openai.vocareum.com/v1",
     api_key=os.getenv("OPENAI_API_KEY"),
 )
@@ -909,7 +909,6 @@ class VectorInventorySearch:
 # Initialize the vector search ONCE with all possible inventory items.
 vector_search_global = VectorInventorySearch([item["item_name"] for item in paper_supplies])
 
-@tool
 def normalize_item_names(user_request: str) -> str:
     """
     Finds phrases in a user request that describe items, normalizes them against official
@@ -985,6 +984,7 @@ You MUST follow this workflow for EVERY task you receive:
 **Tool Usage Rules:**
 
 - **`place_stock_order` Usage Rule**: You MUST follow these steps in sequence BEFORE every single call to `place_stock_order`:
+    0.  **Check Status**: you MUST determine the reorder quantity using formula, quantity = quantity + minimum required level - check_stock_levels
     1.  **Determine Order Cost**: You must know the `item_name`, `quantity`, and `unit_price`.
         - If the task does not provide the `unit_price`, use `get_company_financials` to find it.
         - Calculate the total order cost: `quantity * unit_price`.
@@ -1110,6 +1110,19 @@ class OrderingAgent(ToolCallingAgent):
             prompt_templates=prompt_templates,
         )
 
+class AnalysisAgent(ToolCallingAgent):
+    """
+    An agent that analyzes given text to determine the next steps.
+    """
+    def __init__(self, model: OpenAIServerModel):
+        super().__init__(
+            tools=[],
+            model=model,
+            name="analysis_agent",
+            description="Analyzes the shared text to decide the next action"
+        )
+
+
 # Instead of managed agents, trying a more structure approach hence prompt not needed anymore
 # ORCHESTRATOR_SYSTEM_PROMPT = """You are a master orchestrator agent acting as an expert and delegator. Your goal is to fulfill user requests by executing an efficient, step-by-step workflow.
 #
@@ -1143,15 +1156,16 @@ class OrderingAgent(ToolCallingAgent):
 
 class OrchestratorAgent(ToolCallingAgent):
     """
-    Acts as an expert planner and delegator. It analyzes user requests, creates an efficient,
-    step-by-step plan, and delegates tasks to specialized worker agents. It dynamically reviews
-    and adapts the plan based on intermediate results to ensure optimal workflow.
+    An orchestrator that manages the user's order request workflow by calling the
+    `handle_customer_request` tool. It coordinates between inventory, quoting,
+    ordering, and analysis agents to handle user orders efficiently.
     """
     def __init__(self, model):
         # Instantiate the specialized agents
         self.inventory_agent = InventoryAgent(model=model)
         self.quoting_agent = QuotingAgent(model=model)
         self.ordering_agent = OrderingAgent(model=model)
+        self.analysis_agent = AnalysisAgent(model=model)
 
         # # Load default prompt templates for the ToolCallingAgent
         # prompt_templates = yaml.safe_load(
@@ -1164,7 +1178,7 @@ class OrchestratorAgent(ToolCallingAgent):
         def handle_customer_request(user_request: str, as_of_date: str) -> str:
             """
             Handles a customer's end-to-end request for an order by orchestrating
-            the quoting, inventory, and ordering agents. It gets a quote, checks stock,
+            the quoting, inventory, ordering and analysis agents. It gets a quote, checks stock,
             places a stock order if necessary, and finalizes the customer order.
 
             Args:
@@ -1204,7 +1218,7 @@ class OrchestratorAgent(ToolCallingAgent):
             Example for CANNOT_FULFILL:
             {{"action": "CANNOT_FULFILL", "details": [{{"reason": "current stock status is insufficient and delivery date is not possible to meet"}}]}}
             """
-            analysis_result_message = self.run(analysis_prompt)
+            analysis_result_message = self.analysis_agent.run(analysis_prompt)
             analysis_result = str(analysis_result_message)
 
             try:
@@ -1217,12 +1231,32 @@ class OrchestratorAgent(ToolCallingAgent):
             # Step 4: Execute the determined action.
             if action == "FINALIZE_ORDER":
                 order_task = ""
+                inventory_confirmation_task = "Check inventory for these items using `check_stock_levels`"
                 for item in details:
                     order_task += f"Finalize the order for {item.get('quantity')} of '{item.get('item_name')}' at a total price of {item.get('total_price')} as of {as_of_date}. "
-                order_result_message = self.ordering_agent.run(task=order_task, additional_args={})
-                return str(order_result_message)
+                    inventory_confirmation_task += f" ({item.get('quantity')} of '{item.get('item_name')}' as of {as_of_date}),"
+                inventory_confirmation_task += f"""
+                Result: If current stock of all the items >= quantity, the success is True else False
+                Respond ONLY with a JSON object with keys 'success' and 'reason'.
+                Example for success: {{"success": "True", "reason": "sufficient stocks found"}}
+                Example for failure: {{"success": "False", "reason": "insufficient stocks"}}
+                """
+                inventory_confirmation_message = self.inventory_agent.run(task=inventory_confirmation_task, additional_args={})
+                inventory_confirmation_result = str(inventory_confirmation_message)
+                try:
+                    inventory_confirmation = json.loads(inventory_confirmation_result)
+                    success = inventory_confirmation.get("success")
+                    reason = inventory_confirmation.get("reason")
+                except json.JSONDecodeError:
+                    return f"Error: Could not parse the result of the inventory check. Raw result: {inventory_confirmation_result}"
+                if success:
+                    order_result_message = self.ordering_agent.run(task=order_task, additional_args={})
+                    return str(order_result_message)
+                else:
+                    print(f"Order could not be finalized. The inventory agent failed to confirm the stock. Reason: {reason}")
+                    action = "REORDER_STOCK"
 
-            elif action == "REORDER_STOCK":
+            if action == "REORDER_STOCK":
                 reorder_task = ""
                 for item in details:
                     reorder_task += f"Place a stock order: {item.get("quantity")} of '{item.get("item_name")}' as of {as_of_date}. "
@@ -1250,11 +1284,11 @@ class OrchestratorAgent(ToolCallingAgent):
                 else:
                     return f"Order could not be fulfilled. The inventory agent failed to reorder the stock. Reason: {reason}"
 
-            elif action == "CANNOT_FULFILL":
+            if action == "CANNOT_FULFILL":
                 return f"Order could not be fulfilled. Reason: {details[0].get('reason', 'Could not get a valid quote.')}. Please see our best possible quote. {quote_result}"
 
-            else:
-                return f"Could not determine a valid next step. The original quote was: {quote_result}. The decision was: {decision}"
+
+            return f"Could not determine a valid next step. The original quote was: {quote_result}. The decision was: {decision}"
 
         # Initialize the parent ToolCallingAgent
         super().__init__(
@@ -1262,11 +1296,11 @@ class OrchestratorAgent(ToolCallingAgent):
             tools=[
                 handle_customer_request
             ],
-            description="""You are an orchestrator that manages the user's order request workflow.
-            You coordinate between inventory agent, quoting agent, and ordering agents.
-            Your focus is on handling user orders efficiently.
+            description="""An orchestrator that manages the user's order request workflow by calling the
+            `handle_customer_request` tool. It coordinates between inventory, quoting,
+            ordering, and analysis agents to handle user orders efficiently.
             """,
-            max_steps=5
+            max_steps=1
             # Pass the specialized agents as managed_agents for proper delegation
             # managed_agents=[
             #     inventory_agent,

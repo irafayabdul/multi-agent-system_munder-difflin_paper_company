@@ -1,0 +1,21 @@
+request_id,request_date,cash_balance,inventory_value,response
+1,2025-04-01,45059.7,4940.299999999999,"{""action"": ""REORDER_STOCK"", ""details"": {""item_name"": ""A4 Paper"", ""quantity"": 2025, ""total_price"": 104.29, ""request_date"": ""2025-04-08""}}"
+2,2025-04-03,45059.7,4940.299999999999,"I could not find any of the requested items in inventory. Unfortunately, I am unable to provide a quote for the order based on the current availability. Is there anything else I can assist you with?"
+3,2025-04-04,45059.7,4940.299999999999,CANNOT_FULFILL
+4,2025-04-05,45072.299999999996,4927.799999999999,"The order for 250 units of A4 paper at a total price of $12.60 on April 5, 2025, was successfully finalized. Transaction ID: 18"
+5,2025-04-05,45119.549999999996,4882.8,The order for 300 units of 'Cardstock' at a total price of $47.25 as of 2025-04-05 has been successfully finalized. Transaction ID: 20
+6,2025-04-06,45119.549999999996,4882.8,"{""action"": ""CANNOT_FULFILL"", ""details"": {""reason"": ""current stock status is insufficient and delivery date is not possible to meet""}}"
+7,2025-04-07,45119.549999999996,4882.8,"{""action"": ""REORDER_STOCK"", ""details"": {""item_name"": ""A4 paper"", ""quantity"": 500, ""total_price"": 28.35, ""request_date"": ""2025-04-11""}}"
+8,2025-04-07,45119.549999999996,4882.8,Cannot provide a valid action based on the current information in the inventory.
+9,2025-04-07,45119.549999999996,4882.8,"{""action"":""CANNOT_FULFILL"",""details"":{""reason"":""current stock status is insufficient and the delivery date requested by the user cannot be met""}}"
+13,2025-04-08,45119.549999999996,4882.8,Cannot fulfill the request as the current stock status is insufficient and the delivery date is not possible to meet.
+12,2025-04-08,45149.549999999996,4852.8,The order for 200 units of 'Cardstock' at a total price of $30.00 has been successfully finalized.
+10,2025-04-08,44839.049999999996,4883.25,"{""action"": ""REORDER_STOCK"", ""details"": {""item_name"": ""Glossy paper"", ""quantity"": 500, ""total_price"": 100.0, ""request_date"": ""April 15, 2025""}}"
+11,2025-04-08,44839.049999999996,4891.4,CANNOT_FULFILL
+14,2025-04-09,44839.049999999996,4891.4,"The reorder for A4 paper with 5000 sheets has been successfully placed for delivery by April 16, 2025."
+15,2025-04-12,44839.049999999996,4891.4,Final quote can be generated without loyalty discount.
+16,2025-04-13,44839.049999999996,4891.4,"{""action"": ""CANNOT_FULFILL"", ""details"": {""reason"": ""current stock status is insufficient and delivery date is not possible to meet""}"
+17,2025-04-14,44839.049999999996,4891.4,"{""action"": ""CANNOT_FULFILL"", ""details"": {""reason"": ""current stock status is insufficient and delivery date is not possible to meet""}}"
+18,2025-04-14,44839.049999999996,4891.4,I am unable to access the quote history to determine the discount rate for the items. Would you like to proceed with the base prices for each item?
+19,2025-04-15,44839.049999999996,4891.4,"{""action"": ""REORDER_STOCK"", ""details"": {""item_name"": ""Matte paper"", ""quantity"": 1, ""total_price"": 10.00, ""request_date"":""April 20, 2025""}}"
+20,2025-04-17,44839.049999999996,4891.4,Order could not be fulfilled. Reason: current stock status is insufficient and delivery date is not possible to meet. Please see our best possible quote.
