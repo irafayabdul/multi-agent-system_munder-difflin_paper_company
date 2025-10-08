@@ -13,6 +13,8 @@ The final system architecture is the result of an iterative design process. The 
 However, this initial design proved to be more prone to errors. The complexity of the multi-step workflow meant the orchestrator could sometimes get confused, misinterpret the output from a sub-agent, or fail to follow the prescribed steps accurately. To enhance reliability, the architecture was refactored.
 The current, more robust design replaces the complex prompt-driven workflow with a single, powerful tool called `handle_customer_request` within the `OrchestratorAgent`. This tool programmatically controls the entire process, calling the specialized agents in a fixed, reliable sequence. A key improvement was the introduction of the `AnalysisAgent`, which is tasked with interpreting the output from the `QuotingAgent` and returning a simple, machine-readable JSON object to dictate the next step. This isolates complex decision logic from the main orchestration flow, significantly reducing ambiguity and improving the system's overall consistency and accuracy. The code for the initial `managed_agents` approach remains commented out in `project_starter.py` for reference.
 
+![System Architecture Diagram](workflow_diagram.png)
+
 ### 2.1. Agent Workflow Diagram Explanation
 
 As illustrated in the `workflow_diagram.md` file, the system's workflow is initiated by a user request and follows a logical, sequential process:
