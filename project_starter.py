@@ -1198,7 +1198,7 @@ class OrchestratorAgent(ToolCallingAgent):
             quote_result_message = self.quoting_agent.run(task=quote_task, additional_args={})
             quote_result = str(quote_result_message)
 
-            # Step 3: Use the orchestrator's own model to analyze the quote and decide the next action.
+            # Step 3: Use the analysis agent to analyze the quote and decide the next action.
             analysis_prompt = f"""
             Analyze the following quote and determine the next action based on the rules provided.
             Quote: "{quote_result}"
@@ -1226,7 +1226,7 @@ class OrchestratorAgent(ToolCallingAgent):
                 action = decision.get("action")
                 details = decision.get("details")
             except json.JSONDecodeError:
-                return f"Error: Could not parse the analysis of the quote. Raw quote: {quote_result}, Raw Analysis: {analysis_result}"
+                return "We apologize for the inconvenience, but we encountered a technical issue while processing your request. Please try again later."
 
             # Step 4: Execute the determined action.
             if action == "FINALIZE_ORDER":
@@ -1248,12 +1248,12 @@ class OrchestratorAgent(ToolCallingAgent):
                     success = inventory_confirmation.get("success")
                     reason = inventory_confirmation.get("reason")
                 except json.JSONDecodeError:
-                    return f"Error: Could not parse the result of the inventory check. Raw result: {inventory_confirmation_result}"
+                    return "We apologize, but we encountered a technical issue while checking our inventory. Please try again later."
                 if success:
                     order_result_message = self.ordering_agent.run(task=order_task, additional_args={})
-                    return str(order_result_message)
+                    return f"Your order has been successfully processed. {str(order_result_message)}. We will notify you once it has shipped."
                 else:
-                    print(f"Order could not be finalized. The inventory agent failed to confirm the stock. Reason: {reason}")
+                    print(f"Order could not be finalized. The inventory could not be confirmed. Reason: {reason}")
                     action = "REORDER_STOCK"
 
             if action == "REORDER_STOCK":
@@ -1273,22 +1273,22 @@ class OrchestratorAgent(ToolCallingAgent):
                     success = reorder_result_json.get("success")
                     reason = reorder_result_json.get("reason")
                 except json.JSONDecodeError:
-                    return f"Error: Could not parse the result of the reorder. Raw result: {reorder_result}"
+                    return "We apologize, but we encountered a technical issue while attempting to reorder stock. Please try again later."
 
                 if success:
                     order_task = ""
                     for item in details:
                         order_task += f"Finalize the order for {item.get('quantity')} of '{item.get('item_name')}' at a total price of {item.get('total_price')} as of {as_of_date}. "
                     order_result_message = self.ordering_agent.run(task=order_task, additional_args={})
-                    return str(order_result_message)
+                    return f"Some items in your request were temporarily out of stock. We have placed an order to replenish our inventory, and your order has now been finalized. {str(order_result_message)}."
                 else:
-                    return f"Order could not be fulfilled. The inventory agent failed to reorder the stock. Reason: {reason}"
+                    return f"We apologize, but we are unable to fulfill your order at this time. We could not replenish the required stock due to the following reason: {reason}. Please try again later."
 
             if action == "CANNOT_FULFILL":
-                return f"Order could not be fulfilled. Reason: {details[0].get('reason', 'Could not get a valid quote.')}. Please see our best possible quote. {quote_result}"
+                reason_text = details[0].get('reason', 'Unspecified Issue')
+                return f"We apologize, but we cannot fulfill your order as requested for the following reason: {reason_text}. We have generated a quote based on available stock and delivery times for your consideration:\n\n{quote_result}"
 
-
-            return f"Could not determine a valid next step. The original quote was: {quote_result}. The decision was: {decision}"
+            return "We apologize for the inconvenience, but we were unable to process your request. Please try rephrasing your request."
 
         # Initialize the parent ToolCallingAgent
         super().__init__(
@@ -1300,7 +1300,22 @@ class OrchestratorAgent(ToolCallingAgent):
             `handle_customer_request` tool. It coordinates between inventory, quoting,
             ordering, and analysis agents to handle user orders efficiently.
             """,
-            max_steps=1
+            max_steps=1,
+            instructions="""
+            You are a highly capable customer service agent for munder-difflin paper company.
+            Your primary responsibility is to handle customer inquiries and orders for paper products.
+            You must process every customer request by using the `handle_customer_request` tool.
+            Do not provide advice on how to order from other companies; you ARE the company that fulfills the order.
+            
+            **Response Guidelines:**
+            Your responses should be professional, clear, and directly address the customer's request.
+            Based on the outcome of the `handle_customer_request` tool, provide a final, customer-friendly response that either confirms the order, explains why it cannot be fulfilled with a clear reason, or provides a quote.
+
+            When generating a response for the customer, you MUST adhere to the following rules:
+            1.  **Relevant Information**: Ensure your response contains all the information directly relevant to the customer's request.
+            2.  **Provide Rationale**: Include a clear justification for key decisions. For example, explain why an order cannot be fulfilled (e.g., "due to insufficient stock") or why a price includes a discount.
+            3.  **Protect Sensitive Information**: Your final response to the customer MUST NOT reveal sensitive internal company information, such as exact profit margins, internal system error messages, or any personally identifiable information (PII) beyond what is essential for the transaction.
+            """
             # Pass the specialized agents as managed_agents for proper delegation
             # managed_agents=[
             #     inventory_agent,
