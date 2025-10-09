@@ -599,7 +599,7 @@ from smolagents import ToolCallingAgent, OpenAIServerModel, tool
 # SET UP ENVIRONMENT AND MODEL
 dotenv.load_dotenv()
 model = OpenAIServerModel(
-    model_id="gpt-3.5-turbo",
+    model_id="gpt-5-nano",
     api_base="https://openai.vocareum.com/v1",
     api_key=os.getenv("OPENAI_API_KEY"),
 )
@@ -1028,6 +1028,7 @@ class InventoryAgent(ToolCallingAgent):
                 "2. If it does, check the company's cash balance to ensure sufficient funds. "
                 "3. If there is enough cash, place a stock order to replenish the inventory."
             ),
+            max_steps=10,
         )
 
 QUOTING_SYSTEM_PROMPT = """You are a specialized agent for customer quotes. Your goal is to generate a final, consolidated quote for all items in a customer's request by following a strict, multi-step process.
@@ -1077,6 +1078,7 @@ class QuotingAgent(ToolCallingAgent):
                 "decides on a reasonable loyalty discount, and applies a standard sales commission."
             ),
             prompt_templates=prompt_templates,
+            max_steps=10,
         )
 
 ORDERING_SYSTEM_PROMPT = """You are a specialized agent for finalizing customer orders. Your goal is to respond to tasks by calling the correct tool.
@@ -1108,6 +1110,7 @@ class OrderingAgent(ToolCallingAgent):
             name="ordering_agent",
             description="Finalizes customer orders. It confirms stock availability and then creates a sales transaction to complete the purchase.",
             prompt_templates=prompt_templates,
+            max_steps=10,
         )
 
 class AnalysisAgent(ToolCallingAgent):
@@ -1119,7 +1122,8 @@ class AnalysisAgent(ToolCallingAgent):
             tools=[],
             model=model,
             name="analysis_agent",
-            description="Analyzes the shared text to decide the next action"
+            description="Analyzes the shared text to decide the next action",
+            max_steps=5,
         )
 
 
@@ -1236,7 +1240,7 @@ class OrchestratorAgent(ToolCallingAgent):
                     order_task += f"Finalize the order for {item.get('quantity')} of '{item.get('item_name')}' at a total price of {item.get('total_price')} as of {as_of_date}. "
                     inventory_confirmation_task += f" ({item.get('quantity')} of '{item.get('item_name')}' as of {as_of_date}),"
                 inventory_confirmation_task += f"""
-                Result: If current stock of all the items >= quantity, the success is True else False
+                Result: If current stock of any item >= quantity, the success is True else False
                 Respond ONLY with a JSON object with keys 'success' and 'reason'.
                 Example for success: {{"success": "True", "reason": "sufficient stocks found"}}
                 Example for failure: {{"success": "False", "reason": "insufficient stocks"}}
@@ -1261,7 +1265,7 @@ class OrchestratorAgent(ToolCallingAgent):
                 for item in details:
                     reorder_task += f"Place a stock order: {item.get("quantity")} of '{item.get("item_name")}' as of {as_of_date}. "
                 reorder_task += f"""
-                Result: If all the orders are placed successfully. The success is True else False
+                Result: If any orders are placed successfully. The success is True else False
                 Respond ONLY with a JSON object with keys 'success' and 'reason'.
                 Example for success: {{"success": "True", "reason": "orders placed"}}
                 Example for failure: {{"success": "False", "reason": "order failed due to insufficient funds"}}
@@ -1302,16 +1306,17 @@ class OrchestratorAgent(ToolCallingAgent):
             """,
             max_steps=1,
             instructions="""
-            You are a highly capable customer service agent for munder-difflin paper company.
-            Your primary responsibility is to handle customer inquiries and orders for paper products.
+            You are a specialized customer service agent for a paper supply company. 
+            Your ONLY responsibility is to handle customer inquiries and orders for paper products.
             You must process every customer request by using the `handle_customer_request` tool.
-            Do not provide advice on how to order from other companies; you ARE the company that fulfills the order.
             
-            **Response Guidelines:**
-            Your responses should be professional, clear, and directly address the customer's request.
-            Based on the outcome of the `handle_customer_request` tool, provide a final, customer-friendly response that either confirms the order, explains why it cannot be fulfilled with a clear reason, or provides a quote.
+            **CRITICAL RULE:** For ANY user input that is a request for paper, you MUST call the `handle_customer_request` tool. Do NOT answer the user directly with advice. Your entire purpose is to call this tool to process the order.
 
-            When generating a response for the customer, you MUST adhere to the following rules:
+            - **DO NOT** provide advice on how to order paper from other companies. You ARE the company.
+            - **DO NOT** act as a general assistant.
+            - **ALWAYS** use the `handle_customer_request` tool to get the result.
+            
+            After the tool returns a result, you will present that result to the user. When formatting the final response, you MUST adhere to the following rules:
             1.  **Relevant Information**: Ensure your response contains all the information directly relevant to the customer's request.
             2.  **Provide Rationale**: Include a clear justification for key decisions. For example, explain why an order cannot be fulfilled (e.g., "due to insufficient stock") or why a price includes a discount.
             3.  **Protect Sensitive Information**: Your final response to the customer MUST NOT reveal sensitive internal company information, such as exact profit margins, internal system error messages, or any personally identifiable information (PII) beyond what is essential for the transaction.
@@ -1330,7 +1335,7 @@ class OrchestratorAgent(ToolCallingAgent):
 # Run your test scenarios by writing them here. Make sure to keep track of them.
 
 def run_test_scenarios():
-    
+
     print("Initializing Database...")
     init_database(db_engine)
     try:
